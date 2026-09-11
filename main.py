@@ -4,7 +4,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.3.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.5.0")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -33,8 +33,8 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Recupero degli operatori dalla tabella corretta staging_utenti
-            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&select=id,nome,cognome"
+            # 1. Recupero degli operatori dalla tabella staging_utenti richiedendo tutte le colonne (*)
+            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&select=*"
             resp_utenti = await client.get(url_utenti, headers=headers)
             
             if resp_utenti.status_code != 200:
@@ -76,7 +76,10 @@ async def genera_turni(data: GenerazioneRequest):
 
             # 3. Generazione turni per operatore
             for index_op, op in enumerate(operatori):
-                utente_id = op["id"]
+                utente_id = op.get("id")
+                if not utente_id:
+                    continue
+                
                 indice_seq = index_op % len(sequenza_turni)
 
                 for giorno in range(1, tot_giorni + 1):
