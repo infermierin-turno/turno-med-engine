@@ -3,11 +3,9 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
-calendar_module = None # placeholder to ensure standard library imports if needed
 
-app = FastAPI(title="TurnoMed Python Engine", version="1.0.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.1.0")
 
-# Configurazioni Supabase (assicurati di impostare queste variabili d'ambiente su Render)
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://TUA_SUPABASE_URL.supabase.co")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "TUA_SUPABASE_KEY")
 
@@ -19,7 +17,7 @@ class GenerazioneRequest(BaseModel):
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "message": "TurnoMed Python Engine attivo!"}
+    return {"status": "online", "message": "TurnoMed Python Engine attivo con gestione doppia notte e vincoli 11h!"}
 
 @app.post("/genera-turni")
 async def genera_turni(data: GenerazioneRequest):
@@ -32,18 +30,19 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Recupero degli operatori del reparto da staging_utenti (o utenti)
+            # 1. Recupero degli operatori del reparto
             url_utenti = f"{SUPABASE_URL}/rest/v1/utenti?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&select=id,nome,cognome"
             resp_utenti = await client.get(url_utenti, headers=headers)
             
             if resp_utenti.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Errore recupero utenti da Supabase: {resp_utenti.text}")
+                raise HTTPException(status_code=500, detail=f"Errore recupero utenti: {resp_utenti.text}")
             
             operatori = resp_utenti.json()
             if not operatori:
                 raise HTTPException(status_code=400, detail="Nessun operatore trovato per questo reparto.")
 
-            # Calcolo dei giorni del mese
+            # Calcolo date del mese
+            data_inizio_mese_str = f"{data.anno:04d}-{data.mese:02d}-01"
             if data.mese == 12:
                 primo_giorno_next = datetime(data.anno + 1, 1, 1)
             else:
@@ -51,24 +50,50 @@ async def genera_turni(data: GenerazioneRequest):
             
             ultimo_giorno = primo_giorno_next - timedelta(days=1)
             tot_giorni = ultimo_giorno.day
+            data_fine_mese_str = ultimo_giorno.strftime("%Y-%m-%d")
 
-            # Pattern ciclico di rotazione di base per popolare il tabellone (es: M, P, N, S, R)
-            tipi_turno = ["M", "P", "N", "S", "R"]
+            # 2. Recupero di eventuali ferie o permessi già inseriti nel mese
+            url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&select=utente_id,data_inizio,tipo_evento"
+            resp_assenze = await client.get(url_assenze, headers=headers)
+            
+            assenze_map = {}
+            if resp_assenze.status_code == 200:
+                for row in resp_assenze.json():
+                    u_id = row.get("utente_id")
+                    d_str = row.get("data_inizio", "")[:10]
+                    t_ev = row.get("tipo_evento")
+                    if t_ev in ["F", "Per", "104"]:
+                        if u_id not in assenze_map:
+                            assenze_map[u_id] = {}
+                        assenze_map[u_id][d_str] = t_ev
+
+            # Sequenza con doppia notte: M -> P -> N1 -> N2 -> S -> R
+            # Garantisce le 11 ore di riposo post-notte e permette fino a 2 notti consecutive
+            sequenza_turni = ["M", "P", "N", "N", "S", "R"]
             payload_inserimento = []
 
-            # Generazione turni giorno per giorno per ciascun operatore
+            # 3. Elaborazione iterativa per singolo utente
             for index_op, op in enumerate(operatori):
                 utente_id = op["id"]
+                
+                # Sfasamento iniziale della sequenza per ogni operatore
+                indice_seq = index_op % len(sequenza_turni)
+
                 for giorno in range(1, tot_giorni + 1):
                     data_corrente = datetime(data.anno, data.mese, giorno)
                     data_str = data_corrente.strftime("%Y-%m-%d")
                     
-                    # Assegnazione di rotazione basata sull'indice dell'operatore e del giorno
-                    turno_assegnato = tipi_turno[(giorno + index_op) % len(tipi_turno)]
-                    
-                    # Formato timestamp con offset UTC richiesto da Supabase timestamptz
                     data_inizio_ts = f"{data_str} 00:00:00+00"
                     data_fine_ts = f"{data_str} 23:59:59+00"
+
+                    # Se l'utente ha una ferie o permesso, saltiamo l'inserimento del turno 
+                    # ma facciamo comunque avanzare il contatore della sequenza (senza slittamenti anomali)
+                    if utente_id in assenze_map and data_str in assenze_map[utente_id]:
+                        indice_seq = (indice_seq + 1) % len(sequenza_turni)
+                        continue
+
+                    # Assegnazione del turno corrente dalla sequenza
+                    turno_assegnato = sequenza_turni[indice_seq]
 
                     payload_inserimento.append({
                         "organizzazione_id": data.organizzazione_id,
@@ -80,16 +105,19 @@ async def genera_turni(data: GenerazioneRequest):
                         "stato": "Generato da AI"
                     })
 
-            # 4. Esecuzione dell'upsert massivo nella tabella pianificazione
+                    # Avanza al turno successivo nella rotazione
+                    indice_seq = (indice_seq + 1) % len(sequenza_turni)
+
+            # 4. Salvataggio massivo su Supabase
             url_pianificazione = f"{SUPABASE_URL}/rest/v1/pianificazione"
             resp_upsert = await client.post(url_pianificazione, headers=headers, json=payload_inserimento)
 
             if resp_upsert.status_code not in [200, 201, 204]:
-                raise HTTPException(status_code=500, detail=f"Errore salvataggio pianificazione su Supabase: {resp_upsert.text}")
+                raise HTTPException(status_code=500, detail=f"Errore salvataggio pianificazione: {resp_upsert.text}")
 
             return {
                 "success": True,
-                "message": f"Turni generati e salvati con successo per il reparto {data.reparto_id} ({data.mese}/{data.anno})"
+                "message": f"Turni generati con supporto doppia notte e gestione assenze per il reparto {data.reparto_id} ({data.mese}/{data.anno})"
             }
 
         except Exception as e:
