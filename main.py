@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import httpx
 from typing import Optional
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.6.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.7.0")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -34,7 +34,8 @@ async def genera_turni(data: GenerazioneRequest):
         "Prefer": "resolution=merge-duplicates"
     }
 
-    sequenza_turni = ["M", "P", "N", "N", "S", "R"]
+    # Sequenza standard aggiornata: una sola notte, seguita da Smonto e Riposo
+    sequenza_turni = ["M", "P", "N", "S", "R"]
 
     async with httpx.AsyncClient() as client:
         try:
