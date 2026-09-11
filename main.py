@@ -3,8 +3,9 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
+from typing import Optional
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.5.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.6.0")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -14,6 +15,8 @@ class GenerazioneRequest(BaseModel):
     reparto_id: str
     anno: int
     mese: int
+    operatore_id: Optional[str] = None     # Se specificato, genera solo per lui
+    turno_iniziale: Optional[str] = None   # Es. "M", "P", "N", "S", "R" (opzionale)
 
 @app.get("/")
 def read_root():
@@ -31,18 +34,23 @@ async def genera_turni(data: GenerazioneRequest):
         "Prefer": "resolution=merge-duplicates"
     }
 
+    sequenza_turni = ["M", "P", "N", "N", "S", "R"]
+
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Recupero degli operatori dalla tabella staging_utenti richiedendo tutte le colonne (*)
-            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&select=*"
+            # 1. Costruzione query operatori
+            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}"
+            if data.operatore_id:
+                url_utenti += f"&id=eq.{data.operatore_id}"
+            url_utenti += "&select=*"
+
             resp_utenti = await client.get(url_utenti, headers=headers)
-            
             if resp_utenti.status_code != 200:
                 raise HTTPException(status_code=500, detail=f"Errore Supabase staging_utenti: {resp_utenti.text}")
             
             operatori = resp_utenti.json()
             if not operatori:
-                raise HTTPException(status_code=400, detail=f"Nessun operatore trovato in staging_utenti per organizzazione {data.organizzazione_id} e reparto {data.reparto_id}.")
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato con i filtri selezionati.")
 
             # Calcolo date del mese
             data_inizio_mese_str = f"{data.anno:04d}-{data.mese:02d}-01"
@@ -55,7 +63,7 @@ async def genera_turni(data: GenerazioneRequest):
             tot_giorni = ultimo_giorno.day
             data_fine_mese_str = ultimo_giorno.strftime("%Y-%m-%d")
 
-            # 2. Recupero ferie/assenze esistenti nella tabella pianificazione
+            # 2. Recupero ferie/assenze esistenti
             url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&select=utente_id,data_inizio,tipo_evento"
             resp_assenze = await client.get(url_assenze, headers=headers)
             
@@ -70,17 +78,20 @@ async def genera_turni(data: GenerazioneRequest):
                             assenze_map[u_id] = {}
                         assenze_map[u_id][d_str] = t_ev
 
-            # Sequenza turni con supporto doppia notte: M -> P -> N -> N -> S -> R
-            sequenza_turni = ["M", "P", "N", "N", "S", "R"]
             payload_inserimento = []
 
-            # 3. Generazione turni per operatore
+            # 3. Generazione turni per ogni operatore con sfasamento intelligente (o punto di partenza scelto)
             for index_op, op in enumerate(operatori):
                 utente_id = op.get("id")
                 if not utente_id:
                     continue
                 
-                indice_seq = index_op % len(sequenza_turni)
+                # Determiniamo il punto di partenza nella sequenza
+                if data.turno_iniziale and data.turno_iniziale in sequenza_turni and data.operatore_id:
+                    indice_seq = sequenza_turni.index(data.turno_iniziale)
+                else:
+                    # Sfasamento automatico a cascata per evitare che facciano tutti gli stessi turni
+                    indice_seq = (index_op * 2) % len(sequenza_turni)
 
                 for giorno in range(1, tot_giorni + 1):
                     data_corrente = datetime(data.anno, data.mese, giorno)
@@ -89,7 +100,7 @@ async def genera_turni(data: GenerazioneRequest):
                     data_inizio_ts = f"{data_str} 00:00:00+00"
                     data_fine_ts = f"{data_str} 23:59:59+00"
 
-                    # Se c'è un'assenza (ferie/permesso), saltiamo l'inserimento ma avanziamo il ciclo
+                    # Se c'è un'assenza registrata, saltiamo il turno ma avanziamo la sequenza
                     if utente_id in assenze_map and data_str in assenze_map[utente_id]:
                         indice_seq = (indice_seq + 1) % len(sequenza_turni)
                         continue
@@ -108,7 +119,7 @@ async def genera_turni(data: GenerazioneRequest):
 
                     indice_seq = (indice_seq + 1) % len(sequenza_turni)
 
-            # 4. Scrittura massiva su Supabase nella tabella pianificazione
+            # 4. Scrittura massiva su Supabase
             url_pianificazione = f"{SUPABASE_URL}/rest/v1/pianificazione"
             resp_upsert = await client.post(url_pianificazione, headers=headers, json=payload_inserimento)
 
@@ -117,7 +128,7 @@ async def genera_turni(data: GenerazioneRequest):
 
             return {
                 "success": True,
-                "message": f"Turni generati con successo per il reparto {data.reparto_id} ({data.mese}/{data.anno})"
+                "message": f"Turni generati con successo per {len(operatori)} operatore/i ({data.mese}/{data.anno})"
             }
 
         except Exception as e:
