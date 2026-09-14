@@ -5,7 +5,7 @@ from pydantic import BaseModel
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.1")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -34,7 +34,7 @@ async def genera_turni(data: GenerazioneRequest):
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
-        "Prefer": "resolution=merge-duplicates"
+        "Prefer": "resolution=merge-duplicates,on_conflict=utente_id,data_inizio"
     }
 
     # Sequenza standard aggiornata: una sola notte, seguita da Smonto e Riposo
@@ -95,7 +95,7 @@ async def genera_turni(data: GenerazioneRequest):
 
             payload_inserimento = []
 
-            # 3. Generazione turni per ogni operatore rispettando ferie e modalità mattinieri
+            # 3. Generazione turni per ogni operatore rispettando rigorosamente ferie e assenze
             for index_op, op in enumerate(operatori):
                 utente_id = op.get("id")
                 if not utente_id:
@@ -114,16 +114,13 @@ async def genera_turni(data: GenerazioneRequest):
                     data_inizio_ts = f"{data_str} 00:00:00+00"
                     data_fine_ts = f"{data_str} 23:59:59+00"
 
-                    # REGOLA 1: Se esiste un'assenza o ferie approvata in questa data, NON sovrascriverla
+                    # CONTROLLO BLINDATO: Se esiste un'assenza o ferie approvata, NON generare e NON inserire nulla per questa data
                     if utente_id in assenze_map and data_str in assenze_map[utente_id]:
-                        # Saltiamo la generazione automatica per questa data preservando l'evento esistente
-                        if not data.modalita_mattinieri:
-                            indice_seq = (indice_seq + 1) % len(sequenza_turni)
+                        # Saltiamo completamente l'inserimento per questa cella per preservare l'evento esistente
                         continue
 
-                    # REGOLA 2: Gestione Modalità Mattinieri (Mattina nei feriali/sabato, Riposo la domenica)
+                    # REGOLA: Gestione Modalità Mattinieri (Mattina nei feriali/sabato, Riposo la domenica)
                     if data.modalita_mattinieri:
-                        # In Python weekday(): 0 = Lunedì, ..., 5 = Sabato, 6 = Domenica
                         if data_corrente.weekday() == 6:
                             turno_assegnato = "R" # Domenica libera / Riposo
                         else:
