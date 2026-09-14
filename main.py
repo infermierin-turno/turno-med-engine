@@ -3,9 +3,9 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import httpx
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.7.0")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.0")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -15,8 +15,11 @@ class GenerazioneRequest(BaseModel):
     reparto_id: str
     anno: int
     mese: int
-    operatore_id: Optional[str] = None     # Se specificato, genera solo per lui
-    turno_iniziale: Optional[str] = None   # Es. "M", "P", "N", "S", "R" (opzionale)
+    operatore_id: Optional[str] = None
+    turno_iniziale: Optional[str] = None
+    modalita_mattinieri: Optional[bool] = False
+    rispetta_ferie_approvate: Optional[bool] = True
+    ferie_approvate: Optional[List[Dict[str, Any]]] = []
 
 @app.get("/")
 def read_root():
@@ -64,34 +67,44 @@ async def genera_turni(data: GenerazioneRequest):
             tot_giorni = ultimo_giorno.day
             data_fine_mese_str = ultimo_giorno.strftime("%Y-%m-%d")
 
-            # 2. Recupero ferie/assenze esistenti
-            url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&select=utente_id,data_inizio,tipo_evento"
-            resp_assenze = await client.get(url_assenze, headers=headers)
-            
+            # 2. Recupero e mappatura ferie/assenze approvate (da payload PHP o direttamente da Supabase)
             assenze_map = {}
-            if resp_assenze.status_code == 200:
-                for row in resp_assenze.json():
-                    u_id = row.get("utente_id")
-                    d_str = row.get("data_inizio", "")[:10]
-                    t_ev = row.get("tipo_evento")
-                    if t_ev in ["F", "Per", "104"]:
-                        if u_id not in assenze_map:
-                            assenze_map[u_id] = {}
-                        assenze_map[u_id][d_str] = t_ev
+            if data.rispetta_ferie_approvate:
+                if data.ferie_approvate:
+                    for ev in data.ferie_approvate:
+                        u_id = ev.get("utente_id")
+                        d_str = str(ev.get("data_inizio", ""))[:10]
+                        t_ev = ev.get("tipo_evento")
+                        if u_id and d_str and t_ev:
+                            if u_id not in assenze_map:
+                                assenze_map[u_id] = {}
+                            assenze_map[u_id][d_str] = t_ev
+                else:
+                    # Fallback di sicurezza: interroga Supabase se non passate dal PHP
+                    url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?organizzazione_id=eq.{data.organizzazione_id}&reparto_id=eq.{data.reparto_id}&data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
+                    resp_assenze = await client.get(url_assenze, headers=headers)
+                    if resp_assenze.status_code == 200:
+                        for row in resp_assenze.json():
+                            u_id = row.get("utente_id")
+                            d_str = str(row.get("data_inizio", ""))[:10]
+                            t_ev = row.get("tipo_evento")
+                            if u_id and d_str and t_ev:
+                                if u_id not in assenze_map:
+                                    assenze_map[u_id] = {}
+                                assenze_map[u_id][d_str] = t_ev
 
             payload_inserimento = []
 
-            # 3. Generazione turni per ogni operatore con sfasamento intelligente (o punto di partenza scelto)
+            # 3. Generazione turni per ogni operatore rispettando ferie e modalità mattinieri
             for index_op, op in enumerate(operatori):
                 utente_id = op.get("id")
                 if not utente_id:
                     continue
                 
-                # Determiniamo il punto di partenza nella sequenza
+                # Determiniamo il punto di partenza nella sequenza standard
                 if data.turno_iniziale and data.turno_iniziale in sequenza_turni and data.operatore_id:
                     indice_seq = sequenza_turni.index(data.turno_iniziale)
                 else:
-                    # Sfasamento automatico a cascata per evitare che facciano tutti gli stessi turni
                     indice_seq = (index_op * 2) % len(sequenza_turni)
 
                 for giorno in range(1, tot_giorni + 1):
@@ -101,12 +114,23 @@ async def genera_turni(data: GenerazioneRequest):
                     data_inizio_ts = f"{data_str} 00:00:00+00"
                     data_fine_ts = f"{data_str} 23:59:59+00"
 
-                    # Se c'è un'assenza registrata, saltiamo il turno ma avanziamo la sequenza
+                    # REGOLA 1: Se esiste un'assenza o ferie approvata in questa data, NON sovrascriverla
                     if utente_id in assenze_map and data_str in assenze_map[utente_id]:
-                        indice_seq = (indice_seq + 1) % len(sequenza_turni)
+                        # Saltiamo la generazione automatica per questa data preservando l'evento esistente
+                        if not data.modalita_mattinieri:
+                            indice_seq = (indice_seq + 1) % len(sequenza_turni)
                         continue
 
-                    turno_assegnato = sequenza_turni[indice_seq]
+                    # REGOLA 2: Gestione Modalità Mattinieri (Mattina nei feriali/sabato, Riposo la domenica)
+                    if data.modalita_mattinieri:
+                        # In Python weekday(): 0 = Lunedì, ..., 5 = Sabato, 6 = Domenica
+                        if data_corrente.weekday() == 6:
+                            turno_assegnato = "R" # Domenica libera / Riposo
+                        else:
+                            turno_assegnato = "M" # Mattina nei giorni lavorativi
+                    else:
+                        turno_assegnato = sequenza_turni[indice_seq]
+                        indice_seq = (indice_seq + 1) % len(sequenza_turni)
 
                     payload_inserimento.append({
                         "organizzazione_id": data.organizzazione_id,
@@ -118,8 +142,6 @@ async def genera_turni(data: GenerazioneRequest):
                         "stato": "Generato da AI"
                     })
 
-                    indice_seq = (indice_seq + 1) % len(sequenza_turni)
-
             # 4. Scrittura massiva su Supabase
             url_pianificazione = f"{SUPABASE_URL}/rest/v1/pianificazione"
             resp_upsert = await client.post(url_pianificazione, headers=headers, json=payload_inserimento)
@@ -127,9 +149,10 @@ async def genera_turni(data: GenerazioneRequest):
             if resp_upsert.status_code not in [200, 201, 204]:
                 raise HTTPException(status_code=500, detail=f"Errore scrittura pianificazione Supabase: {resp_upsert.text}")
 
+            modo_str = " (Profilo Mattinieri con domeniche libere)" if data.modalita_mattinieri else ""
             return {
                 "success": True,
-                "message": f"Turni generati con successo per {len(operatori)} operatore/i ({data.mese}/{data.anno})"
+                "message": f"Turni generati con successo per {len(operatori)} operatore/i ({data.mese}/{data.anno}){modo_str}"
             }
 
         except Exception as e:
