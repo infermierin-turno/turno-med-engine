@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.5")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.6")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -51,6 +51,9 @@ async def genera_turni(data: GenerazioneRequest):
     op_id = data.operatore_id or data.utente_id
     t_iniziale = data.turno_iniziale or data.turno_partenza
     riposo_dom = data.riposo_domenicale or data.modalita_mattinieri
+
+    # Identificativo autore valido per campi UUID (evita stringhe descrittive su colonne UUID)
+    autore_uuid = op_id if op_id else None
 
     # Gestione anno e mese (ricavati da data_inizio se non espliciti)
     if not data.anno or not data.mese:
@@ -164,8 +167,9 @@ async def genera_turni(data: GenerazioneRequest):
                             "data_fine": data_fine_ts,
                             "tipo_evento": turno_assegnato,
                             "stato": "Generato da AI",
-                            "creato_da": "Motore AI",
-                            "modificato_da": "Motore AI"
+                            "creato_da": autore_uuid,
+                            "modificato_da": autore_uuid,
+                            "note": "Generato automaticamente da Motore AI"
                         })
                         current_date_iter += timedelta(days=1)
                 else:
@@ -194,8 +198,9 @@ async def genera_turni(data: GenerazioneRequest):
                             "data_fine": data_fine_ts,
                             "tipo_evento": turno_assegnato,
                             "stato": "Generato da AI",
-                            "creato_da": "Motore AI",
-                            "modificato_da": "Motore AI"
+                            "creato_da": autore_uuid,
+                            "modificato_da": autore_uuid,
+                            "note": "Generato automaticamente da Motore AI"
                         })
 
             # 4. Scrittura massiva su Supabase
