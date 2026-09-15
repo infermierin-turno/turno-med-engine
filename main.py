@@ -1,16 +1,18 @@
 import os
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.1")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.2")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 class GenerazioneRequest(BaseModel):
+    model_config = ConfigDict(extra='allow') # Evita errori 422 se arrivano campi extra dal PHP
+    
     organizzazione_id: str
     reparto_id: str
     anno: int
@@ -18,6 +20,7 @@ class GenerazioneRequest(BaseModel):
     operatore_id: Optional[str] = None
     turno_iniziale: Optional[str] = None
     modalita_mattinieri: Optional[bool] = False
+    riposo_domenicale: Optional[bool] = False  # <--- Aggiunto per allinearsi perfettamente al PHP
     rispetta_ferie_approvate: Optional[bool] = True
     ferie_approvate: Optional[List[Dict[str, Any]]] = []
 
@@ -116,11 +119,12 @@ async def genera_turni(data: GenerazioneRequest):
 
                     # CONTROLLO BLINDATO: Se esiste un'assenza o ferie approvata, NON generare e NON inserire nulla per questa data
                     if utente_id in assenze_map and data_str in assenze_map[utente_id]:
-                        # Saltiamo completamente l'inserimento per questa cella per preservare l'evento esistente
                         continue
 
-                    # REGOLA: Gestione Modalità Mattinieri (Mattina nei feriali/sabato, Riposo la domenica)
-                    if data.modalita_mattinieri:
+                    # REGOLA: Gestione Modalità Mattinieri o Riposo Domenicale
+                    is_mattiniero_attivo = data.modalita_mattinieri or data.riposo_domenicale
+
+                    if is_mattiniero_attivo:
                         if data_corrente.weekday() == 6:
                             turno_assegnato = "R" # Domenica libera / Riposo
                         else:
@@ -146,7 +150,7 @@ async def genera_turni(data: GenerazioneRequest):
             if resp_upsert.status_code not in [200, 201, 204]:
                 raise HTTPException(status_code=500, detail=f"Errore scrittura pianificazione Supabase: {resp_upsert.text}")
 
-            modo_str = " (Profilo Mattinieri con domeniche libere)" if data.modalita_mattinieri else ""
+            modo_str = " (Profilo Mattinieri con domeniche libere)" if (data.modalita_mattinieri or data.riposo_domenicale) else ""
             return {
                 "success": True,
                 "message": f"Turni generati con successo per {len(operatori)} operatore/i ({data.mese}/{data.anno}){modo_str}"
