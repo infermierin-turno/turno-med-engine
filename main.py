@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.3")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.5")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -163,7 +163,9 @@ async def genera_turni(data: GenerazioneRequest):
                             "data_inizio": data_inizio_ts,
                             "data_fine": data_fine_ts,
                             "tipo_evento": turno_assegnato,
-                            "stato": "Generato da AI"
+                            "stato": "Generato da AI",
+                            "creato_da": "Motore AI",
+                            "modificato_da": "Motore AI"
                         })
                         current_date_iter += timedelta(days=1)
                 else:
@@ -191,7 +193,9 @@ async def genera_turni(data: GenerazioneRequest):
                             "data_inizio": data_inizio_ts,
                             "data_fine": data_fine_ts,
                             "tipo_evento": turno_assegnato,
-                            "stato": "Generato da AI"
+                            "stato": "Generato da AI",
+                            "creato_da": "Motore AI",
+                            "modificato_da": "Motore AI"
                         })
 
             # 4. Scrittura massiva su Supabase
