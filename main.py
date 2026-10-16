@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.6")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.7")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -52,7 +52,7 @@ async def genera_turni(data: GenerazioneRequest):
     t_iniziale = data.turno_iniziale or data.turno_partenza
     riposo_dom = data.riposo_domenicale or data.modalita_mattinieri
 
-    # Identificativo autore valido per campi UUID (evita stringhe descrittive su colonne UUID)
+    # Identificativo autore valido per campi UUID
     autore_uuid = op_id if op_id else None
 
     # Gestione anno e mese (ricavati da data_inizio se non espliciti)
@@ -76,11 +76,16 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Costruzione query operatori
-            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?organizzazione_id=eq.{org_id}&reparto_id=eq.{rep_id}"
+            # 1. Costruzione query operatori flessibile (supporta anche la ricerca per sola organizzazione)
+            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+            if org_id:
+                url_utenti += f"&organizzazione_id=eq.{org_id}"
+            
+            if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
+                url_utenti += f"&reparto_id=eq.{rep_id}"
+                
             if op_id:
                 url_utenti += f"&id=eq.{op_id}"
-            url_utenti += "&select=*"
 
             resp_utenti = await client.get(url_utenti, headers=headers)
             if resp_utenti.status_code != 200:
@@ -101,7 +106,7 @@ async def genera_turni(data: GenerazioneRequest):
             tot_giorni = ultimo_giorno.day
             data_fine_mese_str = ultimo_giorno.strftime("%Y-%m-%d")
 
-            # Verifica se è stato passato un range personalizzato dal PHP (es. data_inizio / data_fine)
+            # Verifica se è stato passato un range personalizzato dal PHP
             is_custom_range = False
             if data.data_inizio and data.data_fine:
                 try:
@@ -114,7 +119,12 @@ async def genera_turni(data: GenerazioneRequest):
 
             # 2. Recupero ferie/assenze approvate
             assenze_map = {}
-            url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?organizzazione_id=eq.{org_id}&reparto_id=eq.{rep_id}&data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
+            url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
+            if org_id:
+                url_assenze += f"&organizzazione_id=eq.{org_id}"
+            if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
+                url_assenze += f"&reparto_id=eq.{rep_id}"
+
             resp_assenze = await client.get(url_assenze, headers=headers)
             if resp_assenze.status_code == 200:
                 for row in resp_assenze.json():
@@ -131,6 +141,9 @@ async def genera_turni(data: GenerazioneRequest):
             # 3. Generazione turni
             for index_op, op in enumerate(operatori):
                 utente_id = op.get("id")
+                rep_operatore = op.get("reparto_id") or rep_id
+                org_operatore = op.get("organizzazione_id") or org_id
+
                 if not utente_id:
                     continue
                 
@@ -150,7 +163,6 @@ async def genera_turni(data: GenerazioneRequest):
                             current_date_iter += timedelta(days=1)
                             continue
 
-                        # Regola riposo domenicale / mattiniero
                         if riposo_dom and current_date_iter.weekday() == 6:
                             turno_assegnato = "R"
                         elif riposo_dom:
@@ -160,8 +172,8 @@ async def genera_turni(data: GenerazioneRequest):
                             indice_seq = (indice_seq + 1) % len(sequenza_turni)
 
                         payload_inserimento.append({
-                            "organizzazione_id": org_id,
-                            "reparto_id": rep_id,
+                            "organizzazione_id": org_operatore,
+                            "reparto_id": rep_operatore,
                             "utente_id": utente_id,
                             "data_inizio": data_inizio_ts,
                             "data_fine": data_fine_ts,
@@ -191,8 +203,8 @@ async def genera_turni(data: GenerazioneRequest):
                             indice_seq = (indice_seq + 1) % len(sequenza_turni)
 
                         payload_inserimento.append({
-                            "organizzazione_id": org_id,
-                            "reparto_id": rep_id,
+                            "organizzazione_id": org_operatore,
+                            "reparto_id": rep_operatore,
                             "utente_id": utente_id,
                             "data_inizio": data_inizio_ts,
                             "data_fine": data_fine_ts,
