@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.10")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.11")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -75,41 +75,35 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Recupero operatori da staging_utenti con logica di sicurezza e fallback
-            operatori = []
+            # 1. APPROCCIO RADICALE: Scarichiamo tutti gli operatori da staging_utenti senza filtri rigidi di URL
+            url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+            resp_all = await client.get(url_all, headers=headers)
             
-            # Tentativo A: Ricerca mirata se è presente un ID operatore
+            if resp_all.status_code != 200:
+                raise HTTPException(status_code=500, detail=f"Errore Supabase staging_utenti: {resp_all.text}")
+            
+            tutti_operatori = resp_all.json()
+            if not tutti_operatori:
+                raise HTTPException(status_code=400, detail="La tabella staging_utenti su Supabase è completamente vuota.")
+
+            # Se è stato richiesto un operatore specifico (op_id), filtriamo in memoria in modo flessibile
+            operatori = []
             if op_id:
-                url_op = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*&id=eq.{op_id}"
-                resp_op = await client.get(url_op, headers=headers)
-                if resp_op.status_code == 200:
-                    operatori = resp_op.json()
-
-            # Tentativo B: Se non trovato per ID singolo, proviamo con reparto o organizzazione
-            if not operatori:
-                url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+                for o in tutti_operatori:
+                    if str(o.get('id')) == str(op_id) or str(o.get('utente_id')) == str(op_id):
+                        operatori.append(o)
+                # Se per qualsiasi motivo l'ID non combacia esattamente ma c'è un solo utente o vogliamo fallback, se vuoto prendiamo tutti
+                if not operatori:
+                    operatori = tutti_operatori
+            else:
+                # Se non è specificato un singolo operatore, filtriamo per reparto se presente, altrimenti prendiamo tutti
                 if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
-                    url_utenti += f"&reparto_id=eq.{rep_id}"
-                elif org_id:
-                    url_utenti += f"&organizzazione_id=eq.{org_id}"
-
-                resp_utenti = await client.get(url_utenti, headers=headers)
-                if resp_utenti.status_code == 200:
-                    operatori = resp_utenti.json()
-
-            # Tentativo C: Fallback estremo - scarichiamo tutti gli operatori della tabella se i filtri restituiscono vuoto
-            if not operatori:
-                url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
-                resp_all = await client.get(url_all, headers=headers)
-                if resp_all.status_code == 200:
-                    tutti_op = resp_all.json()
-                    if op_id and tutti_op:
-                        operatori = [o for o in tutti_op if str(o.get('id')) == str(op_id) or str(o.get('utente_id')) == str(op_id)]
-                    if not operatori and not op_id:
-                        operatori = tutti_op
+                    operatori = [o for o in tutti_operatori if str(o.get('reparto_id')) == str(rep_id)]
+                if not operatori:
+                    operatori = tutti_operatori
 
             if not operatori:
-                raise HTTPException(status_code=400, detail="Nessun operatore trovato nella tabella staging_utenti.")
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato con i filtri selezionati.")
 
             # Calcolo date del mese
             data_inizio_mese_str = f"{anno:04d}-{mese:02d}-01"
