@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.9")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.10")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -103,8 +103,7 @@ async def genera_turni(data: GenerazioneRequest):
                 resp_all = await client.get(url_all, headers=headers)
                 if resp_all.status_code == 200:
                     tutti_op = resp_all.json()
-                    # Se era stato richiesto un op_id specifico, filtriamo in memoria python per sicurezza
-                    if op_id andutti:
+                    if op_id and tutti_op:
                         operatori = [o for o in tutti_op if str(o.get('id')) == str(op_id) or str(o.get('utente_id')) == str(op_id)]
                     if not operatori and not op_id:
                         operatori = tutti_op
