@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.13")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.14")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -38,9 +38,9 @@ async def genera_turni(data: GenerazioneRequest):
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(status_code=500, detail="Variabili d'ambiente SUPABASE_URL o SUPABASE_KEY non configurate su Render.")
 
+    # CORRETTO: Le chiavi sb_secret_ vanno solo nell'header apikey e NON come Bearer token in Authorization
     headers = {
         "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates,on_conflict=utente_id,data_inizio"
     }
@@ -76,7 +76,6 @@ async def genera_turni(data: GenerazioneRequest):
             url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
             resp_all = await client.get(url_all, headers=headers)
             
-            # Se Supabase restituisce qualsiasi status diverso da 200, solleviamo il testo esatto
             if resp_all.status_code != 200:
                 raise HTTPException(status_code=500, detail=f"Errore Supabase [Status {resp_all.status_code}]: {resp_all.text}")
 
