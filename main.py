@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.15")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.16")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -36,7 +36,7 @@ def read_root():
 @app.post("/genera-turni")
 async def genera_turni(data: GenerazioneRequest):
     if not SUPABASE_URL or not SUPABASE_KEY:
-        raise HTTPException(status_code=500, detail="Variabili d'ambiente SUPABASE_URL o SUPABASE_KEY non configurate su Render.")
+        raise HTTPException(status_code=500, detail="Configurazione Supabase mancante.")
 
     headers = {
         "apikey": SUPABASE_KEY,
@@ -72,22 +72,16 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # Cerchiamo prima nella tabella 'utenti' e se vuota proviamo 'staging_utenti'
-            tutti_operatori = []
-            tabella_usata = ""
-
-            for tabella in ["utenti", "staging_utenti"]:
-                url_tab = f"{SUPABASE_URL}/rest/v1/{tabella}?select=*"
-                resp_tab = await client.get(url_tab, headers=headers)
-                if resp_tab.status_code == 200:
-                    dati = resp_tab.json()
-                    if dati and isinstance(dati, list) and len(dati) > 0:
-                        tutti_operatori = dati
-                        tabella_usata = tabella
-                        break
-
-            if not tutti_operatori:
-                raise HTTPException(status_code=400, detail="Nessun operatore trovato né nella tabella 'utenti' né in 'staging_utenti'. Entrambe risultano vuote.")
+            # Interrogazione pulita della tabella staging_utenti
+            url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+            resp_all = await client.get(url_all, headers=headers)
+            
+            if resp_all.status_code != 200:
+                raise HTTPException(status_code=500, detail="Errore di comunicazione con il database.")
+            
+            tutti_operatori = resp_all.json()
+            if not tutti_operatori or not isinstance(tutti_operatori, list):
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato nella tabella staging_utenti.")
 
             operatori = []
             if op_id:
@@ -103,7 +97,7 @@ async def genera_turni(data: GenerazioneRequest):
                     operatori = tutti_operatori
 
             if not operatori:
-                raise HTTPException(status_code=400, detail=f"Operatori presenti in {tabella_usata}, ma nessuno corrisponde ai filtri.")
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato con i filtri selezionati.")
 
             data_inizio_mese_str = f"{anno:04d}-{mese:02d}-01"
             if mese == 12:
@@ -125,6 +119,7 @@ async def genera_turni(data: GenerazioneRequest):
                 except:
                     is_custom_range = False
 
+            # Recupero ferie/assenze approvate
             assenze_map = {}
             url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
             resp_assenze = await client.get(url_assenze, headers=headers)
@@ -220,15 +215,15 @@ async def genera_turni(data: GenerazioneRequest):
             resp_upsert = await client.post(url_pianificazione, headers=headers, json=payload_inserimento)
 
             if resp_upsert.status_code not in [200, 201, 204]:
-                raise HTTPException(status_code=500, detail=f"Errore scrittura pianificazione Supabase: {resp_upsert.text}")
+                raise HTTPException(status_code=500, detail="Errore durante il salvataggio della pianificazione.")
 
             modo_str = " (con domeniche di riposo garantite)" if riposo_dom else ""
             return {
                 "success": True,
-                "message": f"Turni generati con successo per {len(operatori)} operatore/i dalla tabella {tabella_usata}{modo_str}"
+                "message": f"Turni generati con successo per {len(operatori)} operatore/i{modo_str}"
             }
 
         except Exception as e:
             if isinstance(e, HTTPException):
                 raise e
-            raise HTTPException(status_code=500, detail=f"Errore interno Python: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Errore interno del motore: {str(e)}")
