@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.14")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.15")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -38,7 +38,6 @@ async def genera_turni(data: GenerazioneRequest):
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise HTTPException(status_code=500, detail="Variabili d'ambiente SUPABASE_URL o SUPABASE_KEY non configurate su Render.")
 
-    # CORRETTO: Le chiavi sb_secret_ vanno solo nell'header apikey e NON come Bearer token in Authorization
     headers = {
         "apikey": SUPABASE_KEY,
         "Content-Type": "application/json",
@@ -73,19 +72,22 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
-            resp_all = await client.get(url_all, headers=headers)
-            
-            if resp_all.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Errore Supabase [Status {resp_all.status_code}]: {resp_all.text}")
+            # Cerchiamo prima nella tabella 'utenti' e se vuota proviamo 'staging_utenti'
+            tutti_operatori = []
+            tabella_usata = ""
 
-            try:
-                tutti_operatori = resp_all.json()
-            except Exception as json_err:
-                raise HTTPException(status_code=500, detail=f"Errore parsing JSON da Supabase: {str(json_err)} | Risposta: {resp_all.text}")
+            for tabella in ["utenti", "staging_utenti"]:
+                url_tab = f"{SUPABASE_URL}/rest/v1/{tabella}?select=*"
+                resp_tab = await client.get(url_tab, headers=headers)
+                if resp_tab.status_code == 200:
+                    dati = resp_tab.json()
+                    if dati and isinstance(dati, list) and len(dati) > 0:
+                        tutti_operatori = dati
+                        tabella_usata = tabella
+                        break
 
-            if not tutti_operatori or not isinstance(tutti_operatori, list):
-                raise HTTPException(status_code=400, detail=f"Supabase ha risposto ma la lista è vuota o non valida. Contenuto: {resp_all.text}")
+            if not tutti_operatori:
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato né nella tabella 'utenti' né in 'staging_utenti'. Entrambe risultano vuote.")
 
             operatori = []
             if op_id:
@@ -101,7 +103,7 @@ async def genera_turni(data: GenerazioneRequest):
                     operatori = tutti_operatori
 
             if not operatori:
-                raise HTTPException(status_code=400, detail="Nessun operatore trovato dopo il filtraggio in memoria.")
+                raise HTTPException(status_code=400, detail=f"Operatori presenti in {tabella_usata}, ma nessuno corrisponde ai filtri.")
 
             data_inizio_mese_str = f"{anno:04d}-{mese:02d}-01"
             if mese == 12:
@@ -223,7 +225,7 @@ async def genera_turni(data: GenerazioneRequest):
             modo_str = " (con domeniche di riposo garantite)" if riposo_dom else ""
             return {
                 "success": True,
-                "message": f"Turni generati con successo per {len(operatori)} operatore/i{modo_str}"
+                "message": f"Turni generati con successo per {len(operatori)} operatore/i dalla tabella {tabella_usata}{modo_str}"
             }
 
         except Exception as e:
