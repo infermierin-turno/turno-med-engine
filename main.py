@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.12")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.13")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -76,13 +76,17 @@ async def genera_turni(data: GenerazioneRequest):
             url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
             resp_all = await client.get(url_all, headers=headers)
             
-            # DEBUG ESTESO: Se Supabase fallisce o restituisce errore, lo solleviamo chiaramente
+            # Se Supabase restituisce qualsiasi status diverso da 200, solleviamo il testo esatto
             if resp_all.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Supabase HTTP {resp_all.status_code} su staging_utenti: {resp_all.text}")
-            
-            tutti_operatori = resp_all.json()
-            if not tutti_operatori or not isinstance(tutti_operatori, list) or len(tutti_operatori) == 0:
-                raise HTTPException(status_code=400, detail=f"Supabase ha restituito un array vuoto o non valido per staging_utenti. Risposta grezza: {resp_all.text}")
+                raise HTTPException(status_code=500, detail=f"Errore Supabase [Status {resp_all.status_code}]: {resp_all.text}")
+
+            try:
+                tutti_operatori = resp_all.json()
+            except Exception as json_err:
+                raise HTTPException(status_code=500, detail=f"Errore parsing JSON da Supabase: {str(json_err)} | Risposta: {resp_all.text}")
+
+            if not tutti_operatori or not isinstance(tutti_operatori, list):
+                raise HTTPException(status_code=400, detail=f"Supabase ha risposto ma la lista è vuota o non valida. Contenuto: {resp_all.text}")
 
             operatori = []
             if op_id:
@@ -219,7 +223,7 @@ async def genera_turni(data: GenerazioneRequest):
 
             modo_str = " (con domeniche di riposo garantite)" if riposo_dom else ""
             return {
-                "success": "True",
+                "success": True,
                 "message": f"Turni generati con successo per {len(operatori)} operatore/i{modo_str}"
             }
 
