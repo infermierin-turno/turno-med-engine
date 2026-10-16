@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.7")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.8")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -76,16 +76,16 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Costruzione query operatori flessibile (supporta anche la ricerca per sola organizzazione)
+            # 1. Costruzione query operatori robusta (cerca per ID diretto se presente, altrimenti per reparto/organizzazione)
             url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
-            if org_id:
-                url_utenti += f"&organizzazione_id=eq.{org_id}"
             
-            if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
-                url_utenti += f"&reparto_id=eq.{rep_id}"
-                
             if op_id:
+                # Se è specificato un operatore preciso, lo peschiamo direttamente per ID
                 url_utenti += f"&id=eq.{op_id}"
+            elif rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
+                url_utenti += f"&reparto_id=eq.{rep_id}"
+            elif org_id:
+                url_utenti += f"&organizzazione_id=eq.{org_id}"
 
             resp_utenti = await client.get(url_utenti, headers=headers)
             if resp_utenti.status_code != 200:
