@@ -5,13 +5,13 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.11")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.12")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 
 class GenerazioneRequest(BaseModel):
-    model_config = ConfigDict(extra='allow') # Accetta campi extra ed evita errori 422
+    model_config = ConfigDict(extra='allow')
     
     organizzazione_id: Optional[str] = None
     reparto_id: Optional[str] = None
@@ -45,7 +45,6 @@ async def genera_turni(data: GenerazioneRequest):
         "Prefer": "resolution=merge-duplicates,on_conflict=utente_id,data_inizio"
     }
 
-    # Allineamento flessibile dei campi ricevuti da PHP
     org_id = data.organizzazione_id
     rep_id = data.reparto_id
     op_id = data.operatore_id or data.utente_id
@@ -54,7 +53,6 @@ async def genera_turni(data: GenerazioneRequest):
 
     autore_uuid = op_id if op_id else None
 
-    # Gestione anno e mese
     if not data.anno or not data.mese:
         if data.data_inizio:
             try:
@@ -75,37 +73,33 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. APPROCCIO RADICALE: Scarichiamo tutti gli operatori da staging_utenti senza filtri rigidi di URL
             url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
             resp_all = await client.get(url_all, headers=headers)
             
+            # DEBUG ESTESO: Se Supabase fallisce o restituisce errore, lo solleviamo chiaramente
             if resp_all.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Errore Supabase staging_utenti: {resp_all.text}")
+                raise HTTPException(status_code=500, detail=f"Supabase HTTP {resp_all.status_code} su staging_utenti: {resp_all.text}")
             
             tutti_operatori = resp_all.json()
-            if not tutti_operatori:
-                raise HTTPException(status_code=400, detail="La tabella staging_utenti su Supabase è completamente vuota.")
+            if not tutti_operatori or not isinstance(tutti_operatori, list) or len(tutti_operatori) == 0:
+                raise HTTPException(status_code=400, detail=f"Supabase ha restituito un array vuoto o non valido per staging_utenti. Risposta grezza: {resp_all.text}")
 
-            # Se è stato richiesto un operatore specifico (op_id), filtriamo in memoria in modo flessibile
             operatori = []
             if op_id:
                 for o in tutti_operatori:
                     if str(o.get('id')) == str(op_id) or str(o.get('utente_id')) == str(op_id):
                         operatori.append(o)
-                # Se per qualsiasi motivo l'ID non combacia esattamente ma c'è un solo utente o vogliamo fallback, se vuoto prendiamo tutti
                 if not operatori:
                     operatori = tutti_operatori
             else:
-                # Se non è specificato un singolo operatore, filtriamo per reparto se presente, altrimenti prendiamo tutti
                 if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
                     operatori = [o for o in tutti_operatori if str(o.get('reparto_id')) == str(rep_id)]
                 if not operatori:
                     operatori = tutti_operatori
 
             if not operatori:
-                raise HTTPException(status_code=400, detail="Nessun operatore trovato con i filtri selezionati.")
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato dopo il filtraggio in memoria.")
 
-            # Calcolo date del mese
             data_inizio_mese_str = f"{anno:04d}-{mese:02d}-01"
             if mese == 12:
                 primo_giorno_next = datetime(anno + 1, 1, 1)
@@ -126,7 +120,6 @@ async def genera_turni(data: GenerazioneRequest):
                 except:
                     is_custom_range = False
 
-            # 2. Recupero ferie/assenze approvate
             assenze_map = {}
             url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
             resp_assenze = await client.get(url_assenze, headers=headers)
@@ -142,7 +135,6 @@ async def genera_turni(data: GenerazioneRequest):
 
             payload_inserimento = []
 
-            # 3. Generazione turni
             for index_op, op in enumerate(operatori):
                 utente_id = op.get("id") or op.get("utente_id")
                 rep_operatore = op.get("reparto_id") or rep_id
@@ -219,7 +211,6 @@ async def genera_turni(data: GenerazioneRequest):
                             "note": "Generato automaticamente da Motore AI"
                         })
 
-            # 4. Scrittura massiva su Supabase
             url_pianificazione = f"{SUPABASE_URL}/rest/v1/pianificazione"
             resp_upsert = await client.post(url_pianificazione, headers=headers, json=payload_inserimento)
 
@@ -228,7 +219,7 @@ async def genera_turni(data: GenerazioneRequest):
 
             modo_str = " (con domeniche di riposo garantite)" if riposo_dom else ""
             return {
-                "success": True,
+                "success": "True",
                 "message": f"Turni generati con successo per {len(operatori)} operatore/i{modo_str}"
             }
 
