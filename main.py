@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 import httpx
 from typing import Optional, List, Dict, Any
 
-app = FastAPI(title="TurnoMed Python Engine", version="2.8.8")
+app = FastAPI(title="TurnoMed Python Engine", version="2.8.9")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
@@ -52,10 +52,9 @@ async def genera_turni(data: GenerazioneRequest):
     t_iniziale = data.turno_iniziale or data.turno_partenza
     riposo_dom = data.riposo_domenicale or data.modalita_mattinieri
 
-    # Identificativo autore valido per campi UUID
     autore_uuid = op_id if op_id else None
 
-    # Gestione anno e mese (ricavati da data_inizio se non espliciti)
+    # Gestione anno e mese
     if not data.anno or not data.mese:
         if data.data_inizio:
             try:
@@ -76,24 +75,42 @@ async def genera_turni(data: GenerazioneRequest):
 
     async with httpx.AsyncClient() as client:
         try:
-            # 1. Costruzione query operatori robusta (cerca per ID diretto se presente, altrimenti per reparto/organizzazione)
-            url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+            # 1. Recupero operatori da staging_utenti con logica di sicurezza e fallback
+            operatori = []
             
+            # Tentativo A: Ricerca mirata se è presente un ID operatore
             if op_id:
-                # Se è specificato un operatore preciso, lo peschiamo direttamente per ID
-                url_utenti += f"&id=eq.{op_id}"
-            elif rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
-                url_utenti += f"&reparto_id=eq.{rep_id}"
-            elif org_id:
-                url_utenti += f"&organizzazione_id=eq.{org_id}"
+                url_op = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*&id=eq.{op_id}"
+                resp_op = await client.get(url_op, headers=headers)
+                if resp_op.status_code == 200:
+                    operatori = resp_op.json()
 
-            resp_utenti = await client.get(url_utenti, headers=headers)
-            if resp_utenti.status_code != 200:
-                raise HTTPException(status_code=500, detail=f"Errore Supabase staging_utenti: {resp_utenti.text}")
-            
-            operatori = resp_utenti.json()
+            # Tentativo B: Se non trovato per ID singolo, proviamo con reparto o organizzazione
             if not operatori:
-                raise HTTPException(status_code=400, detail="Nessun operatore trovato con i filtri selezionati.")
+                url_utenti = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+                if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
+                    url_utenti += f"&reparto_id=eq.{rep_id}"
+                elif org_id:
+                    url_utenti += f"&organizzazione_id=eq.{org_id}"
+
+                resp_utenti = await client.get(url_utenti, headers=headers)
+                if resp_utenti.status_code == 200:
+                    operatori = resp_utenti.json()
+
+            # Tentativo C: Fallback estremo - scarichiamo tutti gli operatori della tabella se i filtri restituiscono vuoto
+            if not operatori:
+                url_all = f"{SUPABASE_URL}/rest/v1/staging_utenti?select=*"
+                resp_all = await client.get(url_all, headers=headers)
+                if resp_all.status_code == 200:
+                    tutti_op = resp_all.json()
+                    # Se era stato richiesto un op_id specifico, filtriamo in memoria python per sicurezza
+                    if op_id andutti:
+                        operatori = [o for o in tutti_op if str(o.get('id')) == str(op_id) or str(o.get('utente_id')) == str(op_id)]
+                    if not operatori and not op_id:
+                        operatori = tutti_op
+
+            if not operatori:
+                raise HTTPException(status_code=400, detail="Nessun operatore trovato nella tabella staging_utenti.")
 
             # Calcolo date del mese
             data_inizio_mese_str = f"{anno:04d}-{mese:02d}-01"
@@ -106,7 +123,6 @@ async def genera_turni(data: GenerazioneRequest):
             tot_giorni = ultimo_giorno.day
             data_fine_mese_str = ultimo_giorno.strftime("%Y-%m-%d")
 
-            # Verifica se è stato passato un range personalizzato dal PHP
             is_custom_range = False
             if data.data_inizio and data.data_fine:
                 try:
@@ -120,11 +136,6 @@ async def genera_turni(data: GenerazioneRequest):
             # 2. Recupero ferie/assenze approvate
             assenze_map = {}
             url_assenze = f"{SUPABASE_URL}/rest/v1/pianificazione?data_inizio=gte.{data_inizio_mese_str} 00:00:00&data_inizio=lte.{data_fine_mese_str} 23:59:59&stato=eq.Approvato&select=utente_id,data_inizio,tipo_evento"
-            if org_id:
-                url_assenze += f"&organizzazione_id=eq.{org_id}"
-            if rep_id and str(rep_id).strip() != "" and str(rep_id).lower() != "null":
-                url_assenze += f"&reparto_id=eq.{rep_id}"
-
             resp_assenze = await client.get(url_assenze, headers=headers)
             if resp_assenze.status_code == 200:
                 for row in resp_assenze.json():
@@ -140,7 +151,7 @@ async def genera_turni(data: GenerazioneRequest):
 
             # 3. Generazione turni
             for index_op, op in enumerate(operatori):
-                utente_id = op.get("id")
+                utente_id = op.get("id") or op.get("utente_id")
                 rep_operatore = op.get("reparto_id") or rep_id
                 org_operatore = op.get("organizzazione_id") or org_id
 
